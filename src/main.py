@@ -9,18 +9,19 @@ def main():
     print("\n" + "="*60)
     print("🧠 Local Hybrid Context Memory Agent")
     print(f"Embedding device: {agent.device}")
-    print(f"Parallel fusion mode: {agent.parallel_mode}")
+    print(f"Vector DB: ChromaDB (persistent, efficient)")
     print(f"Memory entries: {len(agent.memory)}")
     print("="*60)
 
     print("\nCommands:")
     print("  /exit            - quit")
     print("  /backup          - create memory backup now")
-    print("  /compact         - run compaction (cluster+summarize)")
     print("  /status          - show status")
-    print("  /reindex         - rebuild FAISS index from embeddings")
     print("  /clear           - CLEAR ALL memory and facts (confirm required)")
-    print("  any other text   - treated as user query")
+    print("  /forget <topic>  - delete memories containing <topic>")
+    print("  /export          - save full conversation history")
+    print("  Or say: 'Clear my memory', 'Forget about X', etc.")
+    print("  Any other text   - treated as user query")
 
     while True:
         try:
@@ -35,23 +36,12 @@ def main():
             elif user_input == "/backup":
                 agent.backup_memory()
 
-            elif user_input == "/compact":
-                agent.compact_memory()
-
             elif user_input == "/status":
                 print(f"\n📊 STATUS:")
                 print(f"Memory entries: {len(agent.memory)}")
                 print(f"Structured facts: {agent.facts}")
-                print(f"FAISS index size: {agent.index.ntotal}")
-
-            elif user_input == "/reindex":
-                if agent.memory:
-                    emb_np = agent.memory_embeddings.cpu().numpy().astype(np.float32)
-                    agent.index.reset()
-                    agent.index.add(emb_np)
-                    print("✅ FAISS index rebuilt.")
-                else:
-                    print("⚠️ No memory to reindex.")
+                if torch.cuda.is_available():
+                    print(f"GPU VRAM: {torch.cuda.memory_allocated()/1e9:.2f} GB used")
 
             elif user_input == "/clear":
                 print("⚠️ Warning: This will erase all memory and facts permanently.")
@@ -61,12 +51,25 @@ def main():
                     agent.memory = []
                     agent._save_facts()
                     agent._save_memory()
-                    agent.index.reset()
-                    agent.memory_embeddings = None
+                    agent._rebuild_chroma_index()
                     agent._pending_name_conflict = False
                     print("✅ All memory and facts cleared.")
                 else:
                     print("❌ Clear aborted.")
+
+            elif user_input.startswith("/forget "):
+                topic = user_input[8:].strip()
+                if agent.forget_memory(topic):
+                    print(f"✅ Memories about '{topic}' forgotten.")
+                else:
+                    print(f"❌ No memories found about '{topic}'.")
+
+            elif user_input == "/export":
+                export_path = os.path.join(agent.memory_dir, "conversation_export.txt")
+                with open(export_path, "w", encoding="utf-8") as f:
+                    for i, mem in enumerate(agent.memory):
+                        f.write(f"[{i+1}] {mem}\n")
+                print(f"📤 Conversation exported to: {export_path}")
 
             else:
                 result = agent.answer_with_memory(user_input)
