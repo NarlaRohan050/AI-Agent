@@ -1,3 +1,11 @@
 {
-  "user_name": "Alex"
+  "user_name": "Not Available",
+  "interests": [
+    "Python",
+    "Programming"
+  ],
+  "goals": [
+    "Sharing code solutions"
+  ],
+  "preferences": []
 }

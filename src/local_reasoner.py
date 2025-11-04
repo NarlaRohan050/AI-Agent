@@ -12,7 +12,6 @@ from sentence_transformers import SentenceTransformer, util
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import re
 import chromadb
-from chromadb.utils import embedding_functions
 
 # -------- CONFIG ----------
 BASE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
@@ -39,18 +38,18 @@ class LocalMemoryAgent:
         print(f"🚀 Loading embedding model on [{self.device}] ...")
         if not os.path.exists(MODEL_DIR):
             raise FileNotFoundError(f"Embedding model not found at {MODEL_DIR}")
-        self.model = SentenceTransformer(MODEL_DIR, device=self.device)
+        self.model = SentenceTransformer(MODEL_DIR, device=self.device, trust_remote_code=True)
         print(f"✅ Embedding model loaded on {self.device.upper()}")
 
         self.embed_dim = EMBED_DIM
         self.memory = []
         self._load_memory()
 
-        # Initialize ChromaDB (replaces FAISS)
+        # Initialize ChromaDB
         self.chroma_client = chromadb.PersistentClient(path=MEMORY_DIR)
         self.collection = self.chroma_client.get_or_create_collection(
             name="memory",
-            embedding_function=None,  # We embed manually
+            embedding_function=None,
             metadata={"hnsw:space": "cosine"}
         )
         self._rebuild_chroma_index()
@@ -70,7 +69,30 @@ class LocalMemoryAgent:
             print(f"✅ Ollama sees models: {REASONING_BASE} and {REASONING_INSTRUCT} (or similar)")
 
     # -------------------------
-    # Memory & ChromaDB
+    # Dynamic GPU/CPU Load Balancing
+    # -------------------------
+    def _get_device_for_embeddings(self):
+        """Return device based on VRAM usage"""
+        if self.device != "cuda" or not torch.cuda.is_available():
+            return "cpu"
+        
+        try:
+            torch.cuda.synchronize()
+            total = torch.cuda.get_device_properties(0).total_memory
+            reserved = torch.cuda.memory_reserved(0)
+            allocated = torch.cuda.memory_allocated(0)
+            used = reserved  # Use reserved as it includes cached memory
+            usage_percent = (used / total)
+            
+            if usage_percent > 0.80:  # 80% threshold
+                print(f"MemoryWarning VRAM usage {usage_percent:.2%} > 80% - using CPU for embeddings")
+                return "cpu"
+            return self.device
+        except:
+            return self.device
+
+    # -------------------------
+    # Memory & ChromaDB (GPU/CPU-AWARE)
     # -------------------------
     def _load_memory(self):
         if os.path.exists(MEMORY_FILE):
@@ -92,16 +114,14 @@ class LocalMemoryAgent:
         os.replace(tmp, MEMORY_FILE)
 
     def _rebuild_chroma_index(self):
-        """Rebuild ChromaDB index from memory.json"""
         try:
-            # Clear collection
             ids = [str(i) for i in range(len(self.memory))]
             if ids:
-                self.collection.add(
-                    ids=ids,
-                    documents=self.memory,
-                    embeddings=self.model.encode(self.memory, convert_to_tensor=False, show_progress_bar=False).tolist()
-                )
+                # Use dynamic device selection
+                emb_device = self._get_device_for_embeddings()
+                emb_tensor = self.model.encode(self.memory, device=emb_device, convert_to_tensor=True, show_progress_bar=False)
+                embeddings = emb_tensor.cpu().numpy().astype(np.float32).tolist()
+                self.collection.add(ids=ids, documents=self.memory, embeddings=embeddings)
             print(f"✅ ChromaDB index rebuilt with {len(self.memory)} entries.")
         except Exception as e:
             print(f"⚠️ Failed to rebuild ChromaDB index: {e}")
@@ -110,77 +130,45 @@ class LocalMemoryAgent:
         with self._lock:
             try:
                 self.memory.append(summary)
-                # Add to Chroma
-                self.collection.add(
-                    ids=[str(len(self.memory) - 1)],
-                    documents=[summary],
-                    embeddings=[self.model.encode(summary, convert_to_tensor=False).tolist()]
-                )
+                # Use dynamic device selection
+                emb_device = self._get_device_for_embeddings()
+                emb_tensor = self.model.encode(summary, device=emb_device, convert_to_tensor=True)
+                embeddings = [emb_tensor.cpu().numpy().astype(np.float32).tolist()]
+                self.collection.add(ids=[str(len(self.memory) - 1)], documents=[summary], embeddings=embeddings)
                 self._save_memory()
                 self.interaction_count += 1
-                # Auto-save every 5 interactions
                 if self.interaction_count % 5 == 0:
                     self._save_memory()
             except Exception as e:
                 print(f"⚠️ Failed to append memory: {e}")
-                # Fallback: rebuild index
                 self._rebuild_chroma_index()
 
-    def search_memory(self, query: str, top_k: int = 5) -> list:
+    def search_memory(self, query: str, top_k: int = 3):  # Reduced for speed
         if not self.memory:
             return []
         try:
-            # Check VRAM usage — if high, use CPU for this query
-            if self._is_vram_high():
-                print("MemoryWarning VRAM high — using CPU for embedding...")
-                query_emb = self.model.encode(query, device="cpu", convert_to_tensor=False).tolist()
-            else:
-                query_emb = self.model.encode(query, device=self.device, convert_to_tensor=False).tolist()
-            
-            results = self.collection.query(
-                query_embeddings=[query_emb],
-                n_results=top_k,
-                include=["documents"]
-            )
+            # Use dynamic device selection
+            emb_device = self._get_device_for_embeddings()
+            query_emb_tensor = self.model.encode(query, device=emb_device, convert_to_tensor=True, show_progress_bar=False)
+            query_emb = query_emb_tensor.cpu().numpy().astype(np.float32).tolist()
+            results = self.collection.query(query_embeddings=[query_emb], n_results=top_k, include=["documents"])
             return [doc for doc in results["documents"][0]] if results["documents"] else []
         except Exception as e:
             print(f"⚠️ ChromaDB search failed: {e}")
             return []
 
-    def _is_vram_high(self, threshold=0.85):
-        """Check if GPU VRAM usage is above threshold (only if CUDA available)"""
-        if self.device != "cuda" or not torch.cuda.is_available():
-            return False
-        try:
-            torch.cuda.synchronize()
-            total = torch.cuda.get_device_properties(0).total_memory
-            reserved = torch.cuda.memory_reserved(0)
-            allocated = torch.cuda.memory_allocated(0)
-            free = reserved - allocated
-            used = total - free
-            return (used / total) > threshold
-        except:
-            return False
-
     def forget_memory(self, topic: str):
-        """Remove memories containing a topic"""
-        to_remove = []
-        for i, mem in enumerate(self.memory):
-            if topic.lower() in mem.lower():
-                to_remove.append(i)
+        to_remove = [i for i, mem in enumerate(self.memory) if topic.lower() in mem.lower()]
         if not to_remove:
             return False
-        # Remove from list (reverse order to preserve indices)
         for i in sorted(to_remove, reverse=True):
             del self.memory[i]
-        # Rebuild Chroma index
-        self.collection.delete(where={"$and": [{"$or": [{"$contains": topic}]}]})  # Simplified: just rebuild
         self._rebuild_chroma_index()
         self._save_memory()
         return True
 
     # -------------------------
-    # Persistence / Checkpoint (facts unchanged)
+    # Persistence & Ollama (Optimized for Speed)
     # -------------------------
     def _load_facts(self):
         if os.path.exists(FACTS_FILE):
@@ -208,9 +196,6 @@ class LocalMemoryAgent:
         except Exception as e:
             print(f"⚠️ Backup failed: {e}")
 
-    # -------------------------
-    # Ollama utils (unchanged)
-    # -------------------------
     def _check_ollama_models(self) -> bool:
         try:
             subprocess.run(["ollama", "--version"], capture_output=True, check=True)
@@ -224,24 +209,32 @@ class LocalMemoryAgent:
         except Exception:
             return False
 
-    def _call_ollama_run(self, model_name: str, prompt: str, timeout: int = 800):
+    def _call_ollama_run(self, model_name: str, prompt: str, timeout: int = 30):  # Reduced timeout
         try:
-            proc = subprocess.run(["ollama", "run", model_name],
-                                  input=prompt.encode("utf-8"),
-                                  stdout=subprocess.PIPE,
-                                  stderr=subprocess.PIPE,
-                                  timeout=timeout)
+            env = os.environ.copy()
+            env["OLLAMA_NUM_CTX"] = "1024"
+            env["OLLAMA_NUM_THREADS"] = "6"
+            env["OLLAMA_TEMPERATURE"] = "0.3"
+            
+            proc = subprocess.run(
+                ["ollama", "run", model_name],
+                input=prompt.encode("utf-8"),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                timeout=timeout,
+                env=env
+            )
             stderr = proc.stderr.decode("utf-8", errors="ignore")
             stdout = proc.stdout.decode("utf-8", errors="ignore").strip()
             if proc.returncode != 0:
                 if "out of memory" in stderr.lower() or "oom" in stderr.lower():
-                    raise RuntimeError("CUDA_OOM")
+                    raise RuntimeError("SYSTEM_OOM")
                 return f"⚠️ Reasoning model error: {stderr.strip()[:400]}"
             return self._extract_content_from_str(stdout)
         except subprocess.TimeoutExpired:
             return "⚠️ Reasoning timed out."
         except RuntimeError as e:
-            if "CUDA_OOM" in str(e):
+            if "SYSTEM_OOM" in str(e):
                 self.last_oom_timestamp = time.time()
                 raise
             raise
@@ -256,10 +249,19 @@ class LocalMemoryAgent:
             return m.group(1).strip()
         return txt.strip()
 
-    def query_model(self, model_name: str, prompt: str, timeout: int = 60):
+    def query_model(self, model_name: str, prompt: str, timeout: int = 25):  # Reduced timeout
         try:
             import ollama as _ollama
-            resp = _ollama.chat(model=model_name, messages=[{"role": "user", "content": prompt}])
+            resp = _ollama.chat(
+                model=model_name,
+                messages=[{"role": "user", "content": prompt}],
+                options={
+                    "num_ctx": 1024,
+                    "num_threads": 6,
+                    "temperature": 0.3,
+                    "num_predict": 200
+                }
+            )
             if isinstance(resp, dict) and "message" in resp:
                 return resp["message"].get("content", "").strip()
             if hasattr(resp, "message") and hasattr(resp.message, "content"):
@@ -272,7 +274,7 @@ class LocalMemoryAgent:
         return self._call_ollama_run(model_name, prompt, timeout=timeout)
 
     # -------------------------
-    # Structured Fact Extraction (unchanged)
+    # Structured Fact Extraction (Optimized)
     # -------------------------
     def extract_structured_facts(self, text: str) -> dict:
         prompt = (
@@ -285,7 +287,7 @@ class LocalMemoryAgent:
             f"Conversation:\n{text}\n\n"
         )
         try:
-            raw = self.query_model(REASONING_INSTRUCT, prompt, timeout=30)
+            raw = self.query_model(REASONING_INSTRUCT, prompt, timeout=20)
             json_match = re.search(r"\{[^{}]*\}", raw)
             if not json_match:
                 json_match = re.search(r"\{.*\}", raw, re.DOTALL)
@@ -314,29 +316,26 @@ class LocalMemoryAgent:
         return {}
 
     # -------------------------
-    # Summarization & Compaction (compaction disabled for Chroma — not needed)
+    # Summarization & Inference (Speed-Optimized)
     # -------------------------
     def summarize_text_via_model(self, text: str, short: bool = True) -> str:
-        prefix = "Summarize the following user/AI exchange into a single concise memory sentence capturing intent and topics:"
+        prefix = "Summarize to 1 sentence:"
         prompt = f"{prefix}\n\n{text}\n\nSummary:"
         try:
-            out = self.query_model(REASONING_INSTRUCT, prompt, timeout=45)
+            out = self.query_model(REASONING_INSTRUCT, prompt, timeout=15)
             if isinstance(out, str) and out.startswith("⚠️"):
-                return (text[:200] + "...").replace("\n", " ")
+                return (text[:150] + "...").replace("\n", " ")
             return self._extract_content_from_str(out).replace("\n", " ").strip()
         except RuntimeError as e:
-            print("⚠️ Summarization OOM detected; falling back to simple truncation.")
-            return (text[:200] + "...").replace("\n", " ")
+            print("⚠️ Summarization OOM detected; truncating.")
+            return (text[:150] + "...").replace("\n", " ")
 
     def compact_memory(self, n_clusters: int | None = None):
         print("ℹ️ ChromaDB manages memory efficiently — compaction not needed.")
 
-    # -------------------------
-    # Hybrid inference (unchanged)
-    # -------------------------
-    def _parallel_infer_and_merge(self, prompt: str, timeout: int = 60) -> str:
-        prompt_base = f"Deep reasoning draft (do not polish). User: {prompt}"
-        prompt_instruct = f"Answer concisely and clearly. User: {prompt}"
+    def _parallel_infer_and_merge(self, prompt: str, timeout: int = 25):  # Reduced timeout
+        prompt_base = f"Draft: {prompt}"
+        prompt_instruct = f"Answer: {prompt}"
 
         responses = {}
         errors = []
@@ -351,38 +350,23 @@ class LocalMemoryAgent:
                     try:
                         res = fut.result()
                         responses[model_name] = res
-                    except RuntimeError as re:
-                        errors.append((model_name, str(re)))
                     except Exception as e:
-                        errors.append((model_name, str(e)))
+                        responses[model_name] = f"⚠️ Error: {str(e)[:100]}"
         except Exception as e:
-            errors.append(("executor", str(e)))
-
-        if any("CUDA_OOM" in str(err) or "out of memory" in str(err).lower() for _, err in errors):
-            self.parallel_mode = False
-            self.last_oom_timestamp = time.time()
-            print("⚠️ GPU OOM detected while running in parallel. Switching to sequential mode for now.")
+            responses = {REASONING_BASE: f"⚠️ Parallel error: {e}"}
 
         if REASONING_BASE in responses and REASONING_INSTRUCT in responses:
             try:
-                combined = f"Base model response:\n{responses[REASONING_BASE]}\n\nInstruct model response:\n{responses[REASONING_INSTRUCT]}"
-                merge_prompt = (
-                    "You are a meta-reasoner. Combine the two responses below: keep correctness from the base draft "
-                    "and clarity from the instruct response. Produce a single final answer.\n\n" + combined + "\n\nFinal answer:"
-                )
-                merged = self.query_model(REASONING_INSTRUCT, merge_prompt, timeout=timeout)
-                return merged
-            except Exception as e:
-                print(f"⚠️ Merge failed, returning instruct response: {e}")
+                merge_prompt = f"Combine: A={responses[REASONING_BASE]}, B={responses[REASONING_INSTRUCT]}. Final:"
+                return self.query_model(REASONING_INSTRUCT, merge_prompt, timeout=15)
+            except:
                 return responses.get(REASONING_INSTRUCT, responses.get(REASONING_BASE, "⚠️ No response."))
-        if responses:
-            return responses.get(REASONING_INSTRUCT) or next(iter(responses.values()))
-        return "⚠️ All reasoning calls failed."
+        return responses.get(REASONING_INSTRUCT) or next(iter(responses.values()))
 
-    def _sequential_infer(self, prompt: str, timeout: int = 60) -> str:
+    def _sequential_infer(self, prompt: str, timeout: int = 25):  # Reduced timeout
         try:
-            draft = self.query_model(REASONING_BASE, f"Draft reasoning: {prompt}", timeout=timeout)
-            refine_prompt = f"Refine the draft into a concise final answer. Draft:\n{draft}\n\nFinal:"
+            draft = self.query_model(REASONING_BASE, f"Draft: {prompt}", timeout=timeout)
+            refine_prompt = f"Refine: {draft}. Final:"
             final = self.query_model(REASONING_INSTRUCT, refine_prompt, timeout=timeout)
             return final
         except RuntimeError as re:
@@ -395,12 +379,11 @@ class LocalMemoryAgent:
             return f"⚠️ Reasoning failed: {e}"
 
     # -------------------------
-    # Main Answer Pipeline (unchanged logic, uses new search)
+    # Main Answer Pipeline (Perfect Integrity Maintained)
     # -------------------------
-    def answer_with_memory(self, query: str, top_k: int = 5) -> dict:
+    def answer_with_memory(self, query: str, top_k: int = 3) -> dict:
         contexts = self.search_memory(query, top_k=top_k)
 
-        # === HANDLE CONFIRMATION REPLIES ===
         if self._pending_name_conflict:
             confirm_match = re.search(
                 r"\b(?:yes|yeah|yep|sure|okay|ok)\b.*?\b(?:i\s*am|i'm)\s+([A-Za-z][a-z]*(?:\s+[A-Za-z][a-z]*)?)",
@@ -423,14 +406,12 @@ class LocalMemoryAgent:
                     "context": contexts
                 }
 
-        # Natural language commands
         if re.search(r"\b(clear|delete|forget)\s+my\s+memory\b", query, re.IGNORECASE):
             self.memory = []
             self._rebuild_chroma_index()
             self._save_memory()
             return {"answer": "🧹 All memories cleared!", "context": []}
 
-        # Normalize query for name detection
         normalized_query = re.sub(r"\bi\s*am\b", "i am", query, flags=re.IGNORECASE)
         normalized_query = re.sub(r"\bmy\s+name\s+is\b", "my name is", normalized_query, flags=re.IGNORECASE)
 
@@ -495,18 +476,18 @@ class LocalMemoryAgent:
         now = time.time()
         if self.parallel_mode:
             try:
-                answer = self._parallel_infer_and_merge(full_context, timeout=75)
+                answer = self._parallel_infer_and_merge(full_context, timeout=25)
             except RuntimeError:
-                answer = self._sequential_infer(full_context, timeout=75)
+                answer = self._sequential_infer(full_context, timeout=25)
         else:
             if self.last_oom_timestamp and now - self.last_oom_timestamp < 600:
                 try:
-                    answer = self._sequential_infer(full_context, timeout=75)
+                    answer = self._sequential_infer(full_context, timeout=25)
                 except Exception:
-                    answer = self.query_model(REASONING_INSTRUCT, f"Answer truthfully: {full_context}", timeout=75)
+                    answer = self.query_model(REASONING_INSTRUCT, f"Answer truthfully: {full_context}", timeout=25)
             else:
                 self.parallel_mode = True
-                answer = self._parallel_infer_and_merge(full_context, timeout=75)
+                answer = self._parallel_infer_and_merge(full_context, timeout=25)
 
         interaction = f"User: {query}\nAI: {answer}"
         new_facts = self.extract_structured_facts(interaction)
