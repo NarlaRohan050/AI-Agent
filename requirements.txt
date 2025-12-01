@@ -1,0 +1,16 @@
+# Core AI & Models
+torch>=2.0
+sentence-transformers>=2.2.0
+ollama>=0.1.0
+
+# Vector Database
+chromadb>=0.4.0
+
+# GPU Monitoring (Optional but recommended)
+nvidia-ml-py>=13.0
+
+# UI
+streamlit>=1.30.0
+
+# Utilities
+numpy>=1.24.0
