@@ -37,4 +37,4 @@ git clone [https://github.com/NarlaRohan050/AI-Agent.git](https://github.com/Nar
 cd AI-Agent
 pip install -r requirements.txt
 streamlit run ui/streamlit_app.py
-python test_agent_max_capacity.pys
+python test_agent_max_capacity.pysContribution by narojupramod04 
