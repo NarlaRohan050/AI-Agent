@@ -142,6 +142,3 @@ Refer to the repository for detailed license information.
 ✅ Built with **privacy, control, and transparency**.
 
 ```
-
-Now that your `README.md` is complete, do you need help with any other Git commands or steps for your project?
-```
