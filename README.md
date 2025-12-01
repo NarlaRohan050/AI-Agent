@@ -1,6 +1,6 @@
 # 🧠 Memora — Your Private, Memory-Aware AI Agent
 
-> **Runs 100% on your machine. Remembers what matters. Never lies.**  
+> **Runs 100% on your machine. Remembers what matters. Never lies.**  
 > Built for ethical hackers, AI researchers, and privacy-first users.
 
 [![Streamlit](https://static.streamlit.io/badge/streamlit.svg)](https://streamlit.io)
@@ -11,18 +11,18 @@ Memora is a **hybrid GPU/CPU AI agent** that combines **Mistral + Mistral-Instru
 
 ## ✨ Features
 
-- ✅ **Persistent memory** using ChromaDB + sentence embeddings  
-- ✅ **Fact extraction**: name, interests, goals — never invented  
-- ✅ **Hallucination prevention**: refuses to answer unknowns  
-- ✅ **Dynamic GPU/CPU load balancing** — avoids VRAM crashes  
-- ✅ **Secure memory deletion**: `/forget salary` removes all traces  
-- ✅ **Name conflict resolution**: “I’m Jordan” → confirmation prompt  
-- ✅ **Redundancy blocking**: avoids duplicate memories  
-- ✅ **NSA-ready**: no telemetry, no cloud, full data sovereignty  
+- ✅ **Persistent memory** using ChromaDB + sentence embeddings  
+- ✅ **Fact extraction**: name, interests, goals — never invented  
+- ✅ **Hallucination prevention**: refuses to answer unknowns  
+- ✅ **Dynamic GPU/CPU load balancing** — avoids VRAM crashes  
+- ✅ **Secure memory deletion**: `/forget salary` removes all traces  
+- ✅ **Name conflict resolution**: “I’m Jordan” → confirmation prompt  
+- ✅ **Redundancy blocking**: avoids duplicate memories  
+- ✅ **NSA-ready**: no telemetry, no cloud, full data sovereignty  
 
 ## 🚀 How to Run (Local Only)
 
-> ⚠️ **Critical**: Do **NOT** run inside **OneDrive**, **Dropbox**, or any cloud-synced folder.  
+> ⚠️ **Critical**: Do **NOT** run inside **OneDrive**, **Dropbox**, or any cloud-synced folder.  
 > Move your project to a local path like `C:\AI-Agent-main` to avoid `PermissionError`.
 
 ### 1. Install Ollama
@@ -33,8 +33,8 @@ Memora is a **hybrid GPU/CPU AI agent** that combines **Mistral + Mistral-Instru
 ```bash
 ollama pull mistral:7b-instruct-v0.2-q5_K_M
 
-git clone https://github.com/NarlaRohan050/AI-Agent.git
+git clone [https://github.com/NarlaRohan050/AI-Agent.git](https://github.com/NarlaRohan050/AI-Agent.git)
 cd AI-Agent
 pip install -r requirements.txt
 streamlit run ui/streamlit_app.py
-python test_agent_max_capacity.py
+python test_agent_max_capacity.pys
