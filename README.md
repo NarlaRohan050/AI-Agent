@@ -140,5 +140,3 @@ Refer to the repository for detailed license information.
 -----
 
 ✅ Built with **privacy, control, and transparency**.
-
-```
