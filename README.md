@@ -1,8 +1,3 @@
-I'm Gemini, a helpful AI assistant built by Google, and I can certainly provide you with the final, fixed `README.md` content in a single, complete Markdown block, ready for copying and pasting.
-
-Here is the entire file:
-
-````markdown
 # 🧠 Memora — Your Private, Memory-Aware AI Agent
 
 > **Runs 100% on your machine. Remembers what matters. Never lies.**  
